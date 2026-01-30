@@ -8,6 +8,8 @@
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Supabase SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
     <div id="root"></div>
@@ -17,7 +19,14 @@
 
         const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
-        // Icons as SVG components
+        // ===== SUPABASE CONFIGURATION =====
+        // TODO: Replace with YOUR Supabase project URL and anon key
+        const SUPABASE_URL = 'https://gimrixvedhqhvugkjwti.supabase.co';
+        const SUPABASE_ANON_KEY = 'gimrixvedhqhvugkjwti';
+        
+        // Initialize Supabase
+        const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
         const PlusIcon = () => (
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -29,6 +38,13 @@
             <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+        );
+
+        const EditIcon = ({ size = 14 }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
             </svg>
         );
 
@@ -48,6 +64,12 @@
             </svg>
         );
 
+        const CloudIcon = ({ size = 16 }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path>
+            </svg>
+        );
+
         function DailyActivityPlanner() {
             const [classes, setClasses] = useState([]);
             const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() - 1] || 'Monday');
@@ -55,30 +77,222 @@
             const [showClassSetup, setShowClassSetup] = useState(false);
             const [timedTasks, setTimedTasks] = useState({});
             const [newTask, setNewTask] = useState({ time: '09:00', text: '' });
+            const [editingActivity, setEditingActivity] = useState(null);
+            const [editingTimedTask, setEditingTimedTask] = useState(null);
+            const [syncStatus, setSyncStatus] = useState('Loading...');
+            const [isSyncing, setIsSyncing] = useState(false);
 
-            // Load from storage
+            // ===== SUPABASE SYNC FUNCTIONS =====
+            const saveToSupabase = async (classesData, timedTasksData, lastResetData) => {
+                try {
+                    setIsSyncing(true);
+                    setSyncStatus('Syncing...');
+
+                    const { data: existing } = await supabase
+                        .from('planner_data')
+                        .select('id')
+                        .eq('user_id', 'default_user')
+                        .single();
+
+                    const payload = {
+                        user_id: 'default_user',
+                        classes: classesData,
+                        timed_tasks: timedTasksData,
+                        last_reset: lastResetData,
+                        updated_at: new Date().toISOString()
+                    };
+
+                    if (existing) {
+                        const { error } = await supabase
+                            .from('planner_data')
+                            .update(payload)
+                            .eq('user_id', 'default_user');
+                        if (error) throw error;
+                    } else {
+                        const { error } = await supabase
+                            .from('planner_data')
+                            .insert(payload);
+                        if (error) throw error;
+                    }
+
+                    console.log('Saved to Supabase!');
+                    setSyncStatus('✓ Synced');
+                    setIsSyncing(false);
+                } catch (error) {
+                    console.error('Error saving to Supabase:', error);
+                    setSyncStatus('⚠ Sync failed');
+                    setIsSyncing(false);
+                }
+            };
+
+            const loadFromSupabase = async () => {
+                try {
+                    setSyncStatus('Loading...');
+                    
+                    const { data, error } = await supabase
+                        .from('planner_data')
+                        .select('*')
+                        .eq('user_id', 'default_user')
+                        .single();
+
+                    if (data) {
+                        console.log('Loaded from Supabase:', data);
+                        
+                        // Load classes
+                        if (data.classes) {
+                            setClasses(data.classes);
+                        }
+                        
+                        // Load timed tasks
+                        if (data.timed_tasks) {
+                            setTimedTasks(data.timed_tasks);
+                        }
+                        
+                        // Load last reset
+                        if (data.last_reset) {
+                            localStorage.setItem('planner-last-reset', data.last_reset);
+                        }
+                        
+                        setSyncStatus('✓ Synced');
+                        return true;
+                    } else if (error && error.code !== 'PGRST116') {
+                        throw error;
+                    } else {
+                        // No data in Supabase, check localStorage for migration
+                        const savedClasses = localStorage.getItem('planner-classes');
+                        const savedTasks = localStorage.getItem('planner-timed-tasks');
+                        const lastReset = localStorage.getItem('planner-last-reset');
+                        
+                        if (savedClasses || savedTasks) {
+                            console.log('Migrating from localStorage to Supabase...');
+                            const classesData = savedClasses ? JSON.parse(savedClasses) : [];
+                            const tasksData = savedTasks ? JSON.parse(savedTasks) : {};
+                            
+                            setClasses(classesData);
+                            setTimedTasks(tasksData);
+                            
+                            await saveToSupabase(classesData, tasksData, lastReset);
+                            
+                            // Clean up old localStorage
+                            localStorage.removeItem('planner-classes');
+                            localStorage.removeItem('planner-timed-tasks');
+                        } else {
+                            setSyncStatus('✓ Synced');
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error loading from Supabase:', error);
+                    setSyncStatus('⚠ Load failed');
+                    
+                    // Fallback to localStorage
+                    const savedClasses = localStorage.getItem('planner-classes');
+                    const savedTasks = localStorage.getItem('planner-timed-tasks');
+                    if (savedClasses) setClasses(JSON.parse(savedClasses));
+                    if (savedTasks) setTimedTasks(JSON.parse(savedTasks));
+                }
+            };
+
+            const checkAndResetWeek = async () => {
+                const lastReset = localStorage.getItem('planner-last-reset');
+                const now = new Date();
+                const currentWeekStart = new Date(now);
+                currentWeekStart.setDate(now.getDate() - now.getDay() + 1);
+                currentWeekStart.setHours(0, 0, 0, 0);
+
+                if (!lastReset || new Date(lastReset) < currentWeekStart) {
+                    const resetClasses = classes.map(cls => ({
+                        ...cls,
+                        activities: Object.keys(cls.activities).reduce((acc, day) => {
+                            acc[day] = cls.activities[day].map(activity => ({
+                                ...activity,
+                                completed: false
+                            }));
+                            return acc;
+                        }, {})
+                    }));
+
+                    const resetTimedTasks = Object.keys(timedTasks).reduce((acc, day) => {
+                        acc[day] = timedTasks[day].map(task => ({
+                            ...task,
+                            completed: false
+                        }));
+                        return acc;
+                    }, {});
+
+                    const newLastReset = currentWeekStart.toISOString();
+                    
+                    setClasses(resetClasses);
+                    setTimedTasks(resetTimedTasks);
+                    localStorage.setItem('planner-last-reset', newLastReset);
+                    
+                    await saveToSupabase(resetClasses, resetTimedTasks, newLastReset);
+                }
+            };
+
+            // Load from Supabase on mount
             useEffect(() => {
-                const savedClasses = localStorage.getItem('planner-classes');
-                const savedTasks = localStorage.getItem('planner-timed-tasks');
-                if (savedClasses) setClasses(JSON.parse(savedClasses));
-                if (savedTasks) setTimedTasks(JSON.parse(savedTasks));
+                loadFromSupabase();
             }, []);
 
-            // Save to storage
+            // Check for weekly reset
             useEffect(() => {
-                localStorage.setItem('planner-classes', JSON.stringify(classes));
+                if (classes.length > 0 || Object.keys(timedTasks).length > 0) {
+                    checkAndResetWeek();
+                }
+            }, [classes, timedTasks]);
+
+            // Save to Supabase whenever classes change
+            useEffect(() => {
+                if (classes.length > 0) {
+                    const lastReset = localStorage.getItem('planner-last-reset');
+                    saveToSupabase(classes, timedTasks, lastReset);
+                }
             }, [classes]);
 
+            // Save to Supabase whenever timed tasks change
             useEffect(() => {
-                localStorage.setItem('planner-timed-tasks', JSON.stringify(timedTasks));
+                if (Object.keys(timedTasks).length > 0) {
+                    const lastReset = localStorage.getItem('planner-last-reset');
+                    saveToSupabase(classes, timedTasks, lastReset);
+                }
             }, [timedTasks]);
 
+            // Set today's day on mount
             useEffect(() => {
                 const today = new Date().getDay();
                 if (today >= 1 && today <= 7) {
                     setSelectedDay(DAYS[today - 1]);
                 }
             }, []);
+
+            // Real-time sync listener
+            useEffect(() => {
+                const channel = supabase
+                    .channel('planner_changes')
+                    .on('postgres_changes', 
+                        { 
+                            event: '*', 
+                            schema: 'public', 
+                            table: 'planner_data',
+                            filter: 'user_id=eq.default_user'
+                        }, 
+                        async (payload) => {
+                            console.log('Real-time update received!', payload);
+                            if (payload.new && !isSyncing) {
+                                if (payload.new.classes) setClasses(payload.new.classes);
+                                if (payload.new.timed_tasks) setTimedTasks(payload.new.timed_tasks);
+                                if (payload.new.last_reset) {
+                                    localStorage.setItem('planner-last-reset', payload.new.last_reset);
+                                }
+                            }
+                        }
+                    )
+                    .subscribe();
+
+                return () => {
+                    supabase.removeChannel(channel);
+                };
+            }, [isSyncing]);
 
             const addClass = () => {
                 if (newClassName.trim()) {
@@ -111,6 +325,24 @@
                     }
                     return c;
                 }));
+            };
+
+            const editActivity = (classId, day, activityId, newText) => {
+                setClasses(classes.map(c => {
+                    if (c.id === classId) {
+                        return {
+                            ...c,
+                            activities: {
+                                ...c.activities,
+                                [day]: (c.activities[day] || []).map(a =>
+                                    a.id === activityId ? { ...a, text: newText } : a
+                                )
+                            }
+                        };
+                    }
+                    return c;
+                }));
+                setEditingActivity(null);
             };
 
             const removeActivity = (classId, day, activityId) => {
@@ -161,6 +393,16 @@
                 }
             };
 
+            const editTimedTask = (day, taskId, newText, newTime) => {
+                setTimedTasks({
+                    ...timedTasks,
+                    [day]: (timedTasks[day] || []).map(t =>
+                        t.id === taskId ? { ...t, text: newText, time: newTime } : t
+                    ).sort((a, b) => a.time.localeCompare(b.time))
+                });
+                setEditingTimedTask(null);
+            };
+
             const removeTimedTask = (day, taskId) => {
                 setTimedTasks({
                     ...timedTasks,
@@ -190,7 +432,13 @@
                     <div className="max-w-7xl mx-auto">
                         <div className="bg-white rounded-lg shadow-lg p-4 md:p-6 mb-6">
                             <h1 className="text-2xl md:text-3xl font-bold text-gray-800 mb-2">Daily Activity Planner</h1>
-                            <p className="text-sm md:text-base text-gray-600">Set up your weekly routine for each class, then add timed tasks as needed</p>
+                            <div className="flex items-center justify-between">
+                                <p className="text-sm md:text-base text-gray-600">Set up your weekly routine for each class - checkboxes reset every Monday!</p>
+                                <div className={`flex items-center gap-2 text-sm ${isSyncing ? 'text-orange-600' : 'text-green-600'}`}>
+                                    <CloudIcon size={16} />
+                                    <span>{syncStatus}</span>
+                                </div>
+                            </div>
                         </div>
 
                         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -253,13 +501,36 @@
                                                                 <div className="mt-2 space-y-2 pl-2">
                                                                     {(cls.activities[day] || []).map(activity => (
                                                                         <div key={activity.id} className="flex justify-between items-center text-xs bg-gray-50 p-2 rounded">
-                                                                            <span className="flex-1">{activity.text}</span>
-                                                                            <button
-                                                                                onClick={() => removeActivity(cls.id, day, activity.id)}
-                                                                                className="text-red-500 ml-2"
-                                                                            >
-                                                                                <TrashIcon size={12} />
-                                                                            </button>
+                                                                            {editingActivity === `${cls.id}-${day}-${activity.id}` ? (
+                                                                                <input
+                                                                                    type="text"
+                                                                                    defaultValue={activity.text}
+                                                                                    autoFocus
+                                                                                    onBlur={(e) => editActivity(cls.id, day, activity.id, e.target.value.trim())}
+                                                                                    onKeyPress={(e) => {
+                                                                                        if (e.key === 'Enter') {
+                                                                                            editActivity(cls.id, day, activity.id, e.target.value.trim());
+                                                                                        }
+                                                                                    }}
+                                                                                    className="flex-1 px-2 py-1 border rounded"
+                                                                                />
+                                                                            ) : (
+                                                                                <span className="flex-1">{activity.text}</span>
+                                                                            )}
+                                                                            <div className="flex gap-1 ml-2">
+                                                                                <button
+                                                                                    onClick={() => setEditingActivity(`${cls.id}-${day}-${activity.id}`)}
+                                                                                    className="text-blue-500 hover:text-blue-700"
+                                                                                >
+                                                                                    <EditIcon size={12} />
+                                                                                </button>
+                                                                                <button
+                                                                                    onClick={() => removeActivity(cls.id, day, activity.id)}
+                                                                                    className="text-red-500 hover:text-red-700"
+                                                                                >
+                                                                                    <TrashIcon size={12} />
+                                                                                </button>
+                                                                            </div>
                                                                         </div>
                                                                     ))}
                                                                     <input
@@ -357,20 +628,58 @@
                                                             onChange={() => toggleTimedTaskComplete(selectedDay, task.id)}
                                                             className="w-5 h-5 text-blue-600 rounded"
                                                         />
-                                                        <div className="flex-1">
-                                                            <div className="font-semibold text-sm text-amber-700">
-                                                                {formatTime(task.time)}
+                                                        {editingTimedTask === `${selectedDay}-${task.id}` ? (
+                                                            <div className="flex-1 space-y-2">
+                                                                <input
+                                                                    type="time"
+                                                                    defaultValue={task.time}
+                                                                    id={`edit-time-${task.id}`}
+                                                                    className="w-full px-2 py-1 border rounded text-sm"
+                                                                />
+                                                                <input
+                                                                    type="text"
+                                                                    defaultValue={task.text}
+                                                                    autoFocus
+                                                                    id={`edit-text-${task.id}`}
+                                                                    onBlur={() => {
+                                                                        const newTime = document.getElementById(`edit-time-${task.id}`).value;
+                                                                        const newText = document.getElementById(`edit-text-${task.id}`).value.trim();
+                                                                        if (newText) editTimedTask(selectedDay, task.id, newText, newTime);
+                                                                    }}
+                                                                    onKeyPress={(e) => {
+                                                                        if (e.key === 'Enter') {
+                                                                            const newTime = document.getElementById(`edit-time-${task.id}`).value;
+                                                                            const newText = e.target.value.trim();
+                                                                            if (newText) editTimedTask(selectedDay, task.id, newText, newTime);
+                                                                        }
+                                                                    }}
+                                                                    className="w-full px-2 py-1 border rounded"
+                                                                />
                                                             </div>
-                                                            <div className={`text-gray-800 ${task.completed ? 'line-through text-gray-500' : ''}`}>
-                                                                {task.text}
+                                                        ) : (
+                                                            <div className="flex-1">
+                                                                <div className="font-semibold text-sm text-amber-700">
+                                                                    {formatTime(task.time)}
+                                                                </div>
+                                                                <div className={`text-gray-800 ${task.completed ? 'line-through text-gray-500' : ''}`}>
+                                                                    {task.text}
+                                                                </div>
                                                             </div>
+                                                        )}
+                                                        <div className="flex gap-2">
+                                                            <button
+                                                                onClick={() => setEditingTimedTask(`${selectedDay}-${task.id}`)}
+                                                                className="text-blue-500 hover:text-blue-700"
+                                                            >
+                                                                <EditIcon />
+                                                            </button>
+                                                            <button
+                                                                onClick={() => removeTimedTask(selectedDay, task.id)}
+                                                                className="text-red-500 hover:text-red-700"
+                                                            >
+                                                                <TrashIcon />
+                                                            </button>
                                                         </div>
-                                                        <button
-                                                            onClick={() => removeTimedTask(selectedDay, task.id)}
-                                                            className="text-red-500 hover:text-red-700"
-                                                        >
-                                                            <TrashIcon />
-                                                        </button>
                                                     </div>
                                                 ))}
                                             </div>
@@ -412,7 +721,7 @@
                                         {classes.every(cls => !(cls.activities[selectedDay] || []).length) && 
                                          (timedTasks[selectedDay] || []).length === 0 && (
                                             <div className="text-center py-12 text-gray-500">
-                                                <CheckCircleIcon size={48} className="mx-auto mb-3 opacity-50" />
+                                                <CheckCircleIcon size={48} />
                                                 <p className="mb-2">No activities for {selectedDay}</p>
                                                 <p className="text-sm">Add class activities or timed tasks to get started</p>
                                             </div>
